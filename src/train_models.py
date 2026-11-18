@@ -1,4 +1,5 @@
 import json
+import sys
 import time
 from pathlib import Path
 import numpy as np
@@ -14,7 +15,6 @@ from sklearn.metrics import f1_score, log_loss, confusion_matrix
 from lightgbm import LGBMClassifier
 from xgboost import XGBClassifier
 
-import sys
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 import config
 from src.data_utils import list_trips, load_trip
@@ -23,199 +23,130 @@ from src.hmm_viterbi import compute_route_continuity
 
 
 def get_models():
+    s = config.SEED
     return {
         "LogisticRegression": (
             "Linear / Probabilistic",
             "StandardScaler + C=1.0, max_iter=300",
-            lambda: make_pipeline(
-                StandardScaler(),
-                LogisticRegression(C=1.0, max_iter=300, random_state=config.RANDOM_SEED),
-            ),
+            lambda: make_pipeline(StandardScaler(), LogisticRegression(C=1.0, max_iter=300, random_state=s)),
         ),
         "RandomForest": (
             "Ensemble (Bagging)",
             "n_estimators=80, max_depth=12, min_samples_leaf=15",
-            lambda: RandomForestClassifier(
-                n_estimators=80,
-                max_depth=12,
-                min_samples_leaf=15,
-                n_jobs=-1,
-                random_state=config.RANDOM_SEED,
-            ),
+            lambda: RandomForestClassifier(n_estimators=80, max_depth=12, min_samples_leaf=15, n_jobs=-1, random_state=s),
         ),
         "HistGradientBoosting": (
             "Boosting (Histogram)",
             "max_iter=150, max_depth=8, lr=0.08",
-            lambda: HistGradientBoostingClassifier(
-                max_iter=150,
-                max_depth=8,
-                learning_rate=0.08,
-                random_state=config.RANDOM_SEED,
-            ),
+            lambda: HistGradientBoostingClassifier(max_iter=150, max_depth=8, learning_rate=0.08, random_state=s),
         ),
         "LightGBM": (
             "Boosting (GBDT)",
             "n_estimators=200, num_leaves=31, lr=0.08",
-            lambda: LGBMClassifier(
-                n_estimators=200,
-                num_leaves=31,
-                learning_rate=0.08,
-                n_jobs=-1,
-                random_state=config.RANDOM_SEED,
-                verbose=-1,
-            ),
+            lambda: LGBMClassifier(n_estimators=200, num_leaves=31, learning_rate=0.08, n_jobs=-1, random_state=s, verbose=-1),
         ),
         "XGBoost": (
             "Boosting (GBDT)",
             "n_estimators=200, max_depth=6, lr=0.08, hist",
-            lambda: XGBClassifier(
-                n_estimators=200,
-                max_depth=6,
-                learning_rate=0.08,
-                tree_method="hist",
-                n_jobs=-1,
-                random_state=config.RANDOM_SEED,
-                eval_metric="logloss",
-            ),
+            lambda: XGBClassifier(n_estimators=200, max_depth=6, learning_rate=0.08, tree_method="hist", n_jobs=-1, random_state=s, eval_metric="logloss"),
         ),
         "MLPClassifier": (
             "Neural Network",
             "StandardScaler + (64, 32), early_stopping=True",
-            lambda: make_pipeline(
-                StandardScaler(),
-                MLPClassifier(
-                    hidden_layer_sizes=(64, 32),
-                    max_iter=25,
-                    early_stopping=True,
-                    n_iter_no_change=5,
-                    random_state=config.RANDOM_SEED,
-                ),
-            ),
+            lambda: make_pipeline(StandardScaler(), MLPClassifier(hidden_layer_sizes=(64, 32), max_iter=25, early_stopping=True, n_iter_no_change=5, random_state=s)),
         ),
     }
 
 
-def eval_observation_top1_and_continuity(test_df: pd.DataFrame, probs: np.ndarray, test_arcs_map: dict) -> tuple[float, float]:
-    work = test_df[["trip_id", "obs_idx", "arc_id", "label"]].copy()
-    work["prob"] = probs
-
-    # Pick candidate with max predicted probability per (trip_id, obs_idx)
-    idx_best = work.groupby(["trip_id", "obs_idx"], sort=False)["prob"].idxmax()
-    best_rows = work.loc[idx_best]
-    top1_acc = float(best_rows["label"].mean())
-
-    conts = []
-    for trip_id, grp in best_rows.groupby("trip_id", sort=False):
-        pred_arcs = grp["arc_id"].to_numpy(dtype=np.int64)
-        conts.append(compute_route_continuity(pred_arcs, test_arcs_map[trip_id]))
-    return top1_acc, float(np.mean(conts))
+def eval_observation_top1_and_continuity(test_df: pd.DataFrame, probs: np.ndarray, arcs_map: dict) -> tuple[float, float]:
+    w = test_df[["trip_id", "obs_idx", "arc_id", "label"]].copy()
+    w["prob"] = probs
+    best = w.loc[w.groupby(["trip_id", "obs_idx"], sort=False)["prob"].idxmax()]
+    conts = [compute_route_continuity(g["arc_id"].to_numpy(dtype=np.int64), arcs_map[tid]) for tid, g in best.groupby("trip_id", sort=False)]
+    return float(best["label"].mean()), float(np.mean(conts))
 
 
 def main():
-    train_df = pd.read_pickle(config.OUTPUTS_DIR / "train_features.pkl")
-    test_df = pd.read_pickle(config.OUTPUTS_DIR / "test_features.pkl")
+    tr_df = pd.read_pickle(config.OUTPUTS_DIR / "train_features.pkl")
+    te_df = pd.read_pickle(config.OUTPUTS_DIR / "test_features.pkl")
 
-    X_train = train_df[FEATURE_COLS].to_numpy(dtype=np.float32)
-    y_train = train_df["label"].to_numpy(dtype=np.int8)
-    groups = train_df["trip_id"].to_numpy()
+    X_tr, y_tr, grps = tr_df[FEATURE_COLS].to_numpy(dtype=np.float32), tr_df["label"].to_numpy(dtype=np.int8), tr_df["trip_id"].to_numpy()
+    X_te, y_te = te_df[FEATURE_COLS].to_numpy(dtype=np.float32), te_df["label"].to_numpy(dtype=np.int8)
+    arcs_map = {tid: load_trip(config.TEST_DIR, tid)["arcs"] for tid in list_trips(config.TEST_DIR)}
 
-    X_test = test_df[FEATURE_COLS].to_numpy(dtype=np.float32)
-    y_test = test_df["label"].to_numpy(dtype=np.int8)
+    splits = list(GroupKFold(n_splits=5).split(X_tr, y_tr, groups=grps))
+    res, cms, mlp_lc = [], {}, None
 
-    test_arcs_map = {}
-    for tid in list_trips(config.TEST_DIR):
-        test_arcs_map[tid] = load_trip(config.TEST_DIR, tid)["arcs"]
-
-    gkf = GroupKFold(n_splits=5)
-    splits = list(gkf.split(X_train, y_train, groups=groups))
-
-    results = []
-    conf_matrices = {}
-    mlp_loss_curve = None
-
-    for name, (family, cfg_str, builder) in get_models().items():
-        print(f"=== {name} ===")
+    for name, (fam, cfg, build) in get_models().items():
         cv_f1s = []
-        for fold, (tr_idx, val_idx) in enumerate(splits):
-            clf = builder()
-            clf.fit(X_train[tr_idx], y_train[tr_idx])
-            val_pred = clf.predict(X_train[val_idx])
-            cv_f1s.append(f1_score(y_train[val_idx], val_pred, average="macro"))
+        for tr_i, val_i in splits:
+            m = build()
+            m.fit(X_tr[tr_i], y_tr[tr_i])
+            cv_f1s.append(f1_score(y_tr[val_i], m.predict(X_tr[val_i]), average="macro"))
 
-        cv_macro_f1 = float(np.mean(cv_f1s))
-
-        # Fit on full 80 training trips
-        final_clf = builder()
+        clf = build()
         t0 = time.perf_counter()
-        final_clf.fit(X_train, y_train)
-        train_time = time.perf_counter() - t0
+        clf.fit(X_tr, y_tr)
+        t_tr = time.perf_counter() - t0
 
         t1 = time.perf_counter()
-        test_probs = final_clf.predict_proba(X_test)[:, 1]
-        test_pred = (test_probs >= 0.5).astype(np.int8)
-        infer_time = time.perf_counter() - t1
+        probs = clf.predict_proba(X_te)[:, 1]
+        preds = (probs >= 0.5).astype(np.int8)
+        t_inf = time.perf_counter() - t1
 
-        test_macro_f1 = float(f1_score(y_test, test_pred, average="macro"))
-        test_logloss = float(log_loss(y_test, np.clip(test_probs, 1e-6, 1 - 1e-6)))
-        top1_acc, route_cont = eval_observation_top1_and_continuity(test_df, test_probs, test_arcs_map)
-        conf_matrices[name] = confusion_matrix(y_test, test_pred).tolist()
-
+        top1, cont = eval_observation_top1_and_continuity(te_df, probs, arcs_map)
+        cms[name] = confusion_matrix(y_te, preds).tolist()
         if name == "MLPClassifier":
-            mlp_step = final_clf.named_steps["mlpclassifier"]
-            mlp_loss_curve = mlp_step.loss_curve_
+            mlp_lc = clf.named_steps["mlpclassifier"].loss_curve_
 
         row = {
             "Model": name,
-            "Algorithm Family": family,
-            "Key Configuration": cfg_str,
-            "CV Macro F1": round(cv_macro_f1, 4),
-            "Top-1 Accuracy": round(top1_acc, 4),
-            "Route Continuity": round(route_cont, 4),
-            "Student-Test Macro F1": round(test_macro_f1, 4),
-            "Log Loss": round(test_logloss, 4),
-            "Train Time (s)": round(train_time, 2),
-            "Inference Time (s)": round(infer_time, 4),
+            "Algorithm Family": fam,
+            "Key Configuration": cfg,
+            "CV Macro F1": round(float(np.mean(cv_f1s)), 4),
+            "Top-1 Accuracy": round(top1, 4),
+            "Route Continuity": round(cont, 4),
+            "Student-Test Macro F1": round(float(f1_score(y_te, preds, average="macro")), 4),
+            "Log Loss": round(float(log_loss(y_te, np.clip(probs, 1e-6, 1 - 1e-6))), 4),
+            "Train Time (s)": round(t_tr, 2),
+            "Inference Time (s)": round(t_inf, 4),
         }
-        results.append(row)
+        res.append(row)
         print(row)
 
-    res_df = pd.DataFrame(results)
-    res_df.to_csv(config.OUTPUTS_DIR / "model_comparison.csv", index=False)
+    rdf = pd.DataFrame(res)
+    rdf.to_csv(config.OUTPUTS_DIR / "model_comparison.csv", index=False)
     with open(config.OUTPUTS_DIR / "model_comparison.json", "w") as f:
-        json.dump({"results": results, "confusion_matrices": conf_matrices}, f, indent=2)
+        json.dump({"results": res, "confusion_matrices": cms}, f, indent=2)
 
-    # Comparison bar plots
-    fig, axes = plt.subplots(1, 3, figsize=(15, 4.5))
-    models = res_df["Model"]
-    x = np.arange(len(models))
-
-    axes[0].bar(x, res_df["CV Macro F1"], color="#3b6998")
-    axes[0].set_xticks(x)
-    axes[0].set_xticklabels(models, rotation=30, ha="right")
-    axes[0].set_ylim(0.5, 1.0)
-    axes[0].set_title("5-Fold GroupCV Macro F1")
+    fig, ax = plt.subplots(1, 3, figsize=(15, 4.5))
+    x = np.arange(len(rdf))
+    ax[0].bar(x, rdf["CV Macro F1"], color="#3b6998")
+    ax[0].set_xticks(x)
+    ax[0].set_xticklabels(rdf["Model"], rotation=30, ha="right")
+    ax[0].set_ylim(0.5, 1.0)
+    ax[0].set_title("5-Fold GroupCV Macro F1")
 
     w = 0.35
-    axes[1].bar(x - w / 2, res_df["Top-1 Accuracy"], width=w, label="Top-1 Acc", color="#2ca02c")
-    axes[1].bar(x + w / 2, res_df["Student-Test Macro F1"], width=w, label="Macro F1", color="#ff7f0e")
-    axes[1].set_xticks(x)
-    axes[1].set_xticklabels(models, rotation=30, ha="right")
-    axes[1].set_ylim(0.5, 1.0)
-    axes[1].set_title("Student-Test Top-1 & Macro F1")
-    axes[1].legend()
+    ax[1].bar(x - w / 2, rdf["Top-1 Accuracy"], width=w, label="Top-1 Acc", color="#2ca02c")
+    ax[1].bar(x + w / 2, rdf["Student-Test Macro F1"], width=w, label="Macro F1", color="#ff7f0e")
+    ax[1].set_xticks(x)
+    ax[1].set_xticklabels(rdf["Model"], rotation=30, ha="right")
+    ax[1].set_ylim(0.5, 1.0)
+    ax[1].set_title("Student-Test Top-1 & Macro F1")
+    ax[1].legend()
 
-    axes[2].bar(x, res_df["Log Loss"], color="#d62728")
-    axes[2].set_xticks(x)
-    axes[2].set_xticklabels(models, rotation=30, ha="right")
-    axes[2].set_title("Student-Test Log Loss (lower is better)")
-
+    ax[2].bar(x, rdf["Log Loss"], color="#d62728")
+    ax[2].set_xticks(x)
+    ax[2].set_xticklabels(rdf["Model"], rotation=30, ha="right")
+    ax[2].set_title("Student-Test Log Loss (lower is better)")
     plt.tight_layout()
     plt.savefig(config.PLOTS_DIR / "model_comparison.png", dpi=150)
     plt.close()
 
-    if mlp_loss_curve is not None:
+    if mlp_lc is not None:
         plt.figure(figsize=(6, 4))
-        plt.plot(range(1, len(mlp_loss_curve) + 1), mlp_loss_curve, marker="o", color="#1f77b4")
+        plt.plot(range(1, len(mlp_lc) + 1), mlp_lc, marker="o", color="#1f77b4")
         plt.xlabel("Epoch")
         plt.ylabel("Training Log Loss")
         plt.title("MLPClassifier Training Loss Curve")
