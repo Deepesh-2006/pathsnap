@@ -1,0 +1,12 @@
+{
+  "classifier_only": {
+    "obs_top1_acc": 0.858,
+    "route_continuity": 0.7497,
+    "route_set_f1": 0.8422
+  },
+  "classifier_plus_hmm": {
+    "obs_top1_acc": 0.8756,
+    "route_continuity": 0.88,
+    "route_set_f1": 0.8895
+  }
+}

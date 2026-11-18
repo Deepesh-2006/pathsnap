@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PathSnap Evaluator UI</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; color: #1e293b; background: #f8fafc; }
+    header { background: #0f172a; color: #fff; padding: 14px 24px; display: flex; align-items: center; justify-content: space-between; }
+    header h1 { margin: 0; font-size: 18px; font-weight: 600; }
+    .container { display: grid; grid-template-columns: 320px 1fr; height: calc(100vh - 52px); }
+    .sidebar { background: #fff; border-right: 1px solid #e2e8f0; padding: 18px; overflow-y: auto; display: flex; flex-direction: column; gap: 14px; }
+    label { font-size: 12px; font-weight: 600; color: #475569; display: block; margin-bottom: 4px; }
+    input, select, button { width: 100%; padding: 8px 10px; border-radius: 6px; border: 1px solid #cbd5e1; font-size: 14px; }
+    button { background: #2563eb; color: #fff; border: none; font-weight: 600; cursor: pointer; }
+    button:hover { background: #1d4ed8; }
+    button:disabled { background: #94a3b8; cursor: not-allowed; }
+    .btn-secondary { background: #475569; }
+    .btn-secondary:hover { background: #334155; }
+    .metrics { background: #f1f5f9; border-radius: 8px; padding: 12px; font-size: 13px; }
+    .metric-row { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid #e2e8f0; }
+    .metric-row:last-child { border-bottom: none; }
+    .status { font-size: 12px; color: #64748b; min-height: 18px; }
+    #map { width: 100%; height: 100%; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>PathSnap — Route Reconstruction Evaluator</h1>
+    <span id="connBadge" style="font-size:12px; color:#94a3b8;">Not connected</span>
+  </header>
+
+  <div class="container">
+    <aside class="sidebar">
+      <div>
+        <label for="apiUrl">API Base URL (Laptop 1)</label>
+        <input id="apiUrl" type="text" value="http://localhost:8000" />
+      </div>
+      <button class="btn-secondary" onclick="loadTrips()">Connect &amp; Load Trips</button>
+
+      <div>
+        <label for="tripSelect">Evaluation Trip</label>
+        <select id="tripSelect"></select>
+      </div>
+      <button id="runBtn" onclick="runPrediction()" disabled>Reconstruct Route</button>
+
+      <div class="status" id="statusText">Enter Laptop 1 API URL and load trips.</div>
+
+      <div class="metrics" id="metricsBox" style="display:none;">
+        <div style="font-weight:600; margin-bottom:6px;">Evaluation Results</div>
+        <div id="metricsList"></div>
+      </div>
+
+      <div style="font-size:12px; color:#64748b; margin-top:auto;">
+        <div><span style="color:#2563eb;">&#9679;</span> Raw GPS Observations</div>
+        <div><span style="color:#dc2626;">&#9473;</span> Reconstructed Route (Model + HMM)</div>
+      </div>
+    </aside>
+
+    <main id="map"></main>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    const map = L.map("map").setView([49.85, 8.60], 13);
+    L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
+      attribution: "&copy; OpenStreetMap &copy; CARTO"
+    }).addTo(map);
+
+    let gpsLayer = L.layerGroup().addTo(map);
+    let routeLayer = L.layerGroup().addTo(map);
+
+    function apiBase() {
+      return document.getElementById("apiUrl").value.replace(/\/+$/, "");
+    }
+
+    async function loadTrips() {
+      const status = document.getElementById("statusText");
+      const badge = document.getElementById("connBadge");
+      status.textContent = "Connecting...";
+      try {
+        const res = await fetch(`${apiBase()}/trips`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        const sel = document.getElementById("tripSelect");
+        sel.innerHTML = "";
+        data.trips.forEach(t => {
+          const opt = document.createElement("option");
+          opt.value = t;
+          opt.textContent = t;
+          sel.appendChild(opt);
+        });
+        document.getElementById("runBtn").disabled = data.trips.length === 0;
+        badge.textContent = `Connected (${data.trips.length} trips)`;
+        badge.style.color = "#4ade80";
+        status.textContent = "Select a trip and click Reconstruct Route.";
+      } catch (err) {
+        badge.textContent = "Connection failed";
+        badge.style.color = "#f87171";
+        status.textContent = `Error: ${err.message}`;
+      }
+    }
+
+    async function runPrediction() {
+      const tripId = document.getElementById("tripSelect").value;
+      const status = document.getElementById("statusText");
+      const btn = document.getElementById("runBtn");
+      btn.disabled = true;
+      status.textContent = `Running pipeline for ${tripId}...`;
+
+      try {
+        const res = await fetch(`${apiBase()}/predict/${tripId}`, { method: "POST" });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+
+        gpsLayer.clearLayers();
+        routeLayer.clearLayers();
+
+        const step = Math.max(1, Math.floor(data.gps_points.length / 300));
+        data.gps_points.forEach((pt, idx) => {
+          if (idx % step === 0) {
+            L.circleMarker(pt, { radius: 3, color: "#2563eb", fillOpacity: 0.8, stroke: false }).addTo(gpsLayer);
+          }
+        });
+
+        data.predicted_segments.forEach(seg => {
+          L.polyline(seg, { color: "#dc2626", weight: 4, opacity: 0.9 }).addTo(routeLayer);
+        });
+
+        if (data.gps_points.length > 0) {
+          map.fitBounds(L.latLngBounds(data.gps_points), { padding: [25, 25] });
+        }
+
+        const mList = document.getElementById("metricsList");
+        mList.innerHTML = "";
+        Object.entries(data.metrics).forEach(([k, v]) => {
+          const row = document.createElement("div");
+          row.className = "metric-row";
+          row.innerHTML = `<span>${k}</span><strong>${v}</strong>`;
+          mList.appendChild(row);
+        });
+        document.getElementById("metricsBox").style.display = "block";
+        status.textContent = `Done (${tripId}).`;
+      } catch (err) {
+        status.textContent = `Prediction failed: ${err.message}`;
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    // Auto-connect if running locally
+    loadTrips();
+  </script>
+</body>
+</html>

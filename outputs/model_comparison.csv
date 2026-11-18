@@ -1,0 +1,7 @@
+Model,Algorithm Family,Key Configuration,CV Macro F1,Top-1 Accuracy,Route Continuity,Student-Test Macro F1,Log Loss,Train Time (s),Inference Time (s)
+LogisticRegression,Linear / Probabilistic,"StandardScaler + C=1.0, max_iter=300",0.8609,0.8158,0.7316,0.8853,0.1059,0.84,0.004
+RandomForest,Ensemble (Bagging),"n_estimators=80, max_depth=12, min_samples_leaf=15",0.8859,0.8326,0.7467,0.905,0.0812,50.23,0.0871
+HistGradientBoosting,Boosting (Histogram),"max_iter=150, max_depth=8, lr=0.08",0.8853,0.8341,0.7506,0.9061,0.0821,8.21,0.1575
+LightGBM,Boosting (GBDT),"n_estimators=200, num_leaves=31, lr=0.08",0.8773,0.8329,0.7377,0.905,0.0852,4.2,0.1873
+XGBoost,Boosting (GBDT),"n_estimators=200, max_depth=6, lr=0.08, hist",0.8865,0.8355,0.757,0.9063,0.0805,6.27,0.0528
+MLPClassifier,Neural Network,"StandardScaler + (64, 32), early_stopping=True",0.8834,0.8325,0.7575,0.9051,0.0844,33.51,0.0196
